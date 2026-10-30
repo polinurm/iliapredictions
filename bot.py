@@ -16,7 +16,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from dotenv import load_dotenv
 
 import db
-from scoring import FIELDS, parse_elements, score_entry
+import texts as T
+from scoring import FIELDS, LIMITS, canon, parse_elements, score_entry
 
 load_dotenv()
 TOKEN = os.environ["BOT_TOKEN"]
@@ -56,12 +57,17 @@ class SqliteStorage(BaseStorage):
         pass
 
 
-HINTS = {
-    "int": "Целое число, например: 2",
-    "float": "Число, например: 98.45",
-    "elements": "Через запятую, например: 4Lz, 4F, 3A, 4T+3T",
-    "yesno": "Да или Нет",
-}
+def hint_for(kind: str, key: str = "") -> str:
+    if key == "place":
+        return T.HINT_PLACE
+    return {"int": T.HINT_INT, "float": T.HINT_FLOAT, "yesno": T.HINT_YESNO,
+            "elements": T.HINT_ELEMENTS_TEXT}[kind]
+
+
+def limits_for(key: str):
+    """(макс. элементов, макс. каскадов) для пункта с контентом."""
+    lim = LIMITS.get(key)
+    return (lim["elements"], lim["cascades"]) if lim else (99, 99)
 
 
 # ---------------------------------------------------------------- helpers
@@ -97,9 +103,9 @@ def fmt_answers(steps, answers):
     for key, label, kind in steps:
         v = answers.get(key)
         if v is None:
-            shown = "—"
+            shown = T.SKIPPED_MARK
         elif isinstance(v, list):
-            shown = ", ".join(v)
+            shown = " → ".join(v)
         else:
             shown = str(v)
         lines.append(f"• {label} {shown}")
@@ -110,52 +116,75 @@ JUMP_TYPES = ["T", "S", "Lo", "F", "Lz", "A"]
 BUILDER_RESET = {"el_done": [], "el_cur": [], "el_rot": None, "el_phase": "rot"}
 
 
-def render_builder(d: dict, header: str):
-    """Пошаговый ввод элемента: обороты -> тип прыжка -> каскад? -> ещё элемент / готово."""
+def can_cascade(cur: list, cas_used: int, n_cas: int) -> bool:
+    """Можно ли добавить к текущему элементу ещё один прыжок (каскад до 3 прыжков)."""
+    return len(cur) < 3 and (len(cur) >= 2 or cas_used < n_cas)
+
+
+def render_builder(d: dict, header: str, key: str = ""):
+    """Пошаговый ввод: обороты -> тип прыжка -> каскад? -> ещё элемент / готово.
+    Порядок элементов = порядок ввода, лимиты берутся из scoring.LIMITS."""
     done = d.get("el_done", [])
     cur = d.get("el_cur", [])
     rot = d.get("el_rot")
     phase = d.get("el_phase", "rot")
+    n_el, n_cas = limits_for(key)
+    limited = key in LIMITS
+    cas_used = sum(1 for e in done if "+" in e)
+    full = len(done) >= n_el
     btn = InlineKeyboardButton
+
     lines = [header]
     rows = []
+    if limited:
+        lines.append(T.rules(T.PART.get(key, ""), n_el, n_cas))
+    lines.append(T.ORDER_HINT)
     if done:
-        lines.append("Уже добавлено: " + ", ".join(done))
+        lines.append("")
+        lines.append(T.LIST_TITLE)
+        lines += [T.LIST_ITEM.format(i=i, el=e) for i, e in enumerate(done, 1)]
+    if limited:
+        lines.append("")
+        if phase != "menu":
+            lines.append(T.NOW_ENTERING.format(k=len(done) + 1, n=n_el))
+        if not full:
+            lines.append(T.LEFT.format(left=n_el - len(done), cas_left=n_cas - cas_used, cas=n_cas))
+    lines.append("")
 
     if phase == "rot":
-        if cur:
-            lines.append(f"Каскад: {'+'.join(cur)}+… Введите количество оборотов следующего прыжка.")
-        else:
-            lines.append(f"Элемент {len(done) + 1}. Введите количество оборотов.")
-        lines.append("(Можно сразу написать текстом, например: 4Lz+3T, 3A)")
+        lines.append(T.ASK_ROT_CASC.format(cur="+".join(cur)) if cur else T.ASK_ROT)
+        lines.append(T.HINT_ELEMENTS_TEXT)
         rows.append([btn(text=str(n), callback_data=f"rot:{n}") for n in (1, 2, 3, 4, 5)])
         if cur:
-            rows.append([btn(text="✖️ Сбросить элемент", callback_data="elreset")])
+            rows.append([btn(text=T.BTN_RESET, callback_data="elreset")])
         elif done:
-            rows.append([btn(text="← К списку", callback_data="elreset")])
+            rows.append([btn(text=T.BTN_BACK_LIST, callback_data="elreset")])
     elif phase == "type":
-        start = "+".join(cur + [str(rot)])
-        lines.append(f"{start}… Введите тип прыжка (A — аксель).")
+        lines.append(T.ASK_TYPE.format(start="+".join(cur + [str(rot)])))
         types = [btn(text=t, callback_data=f"typ:{t}") for t in JUMP_TYPES]
         rows += [types[:3], types[3:]]
-        rows.append([btn(text="✖️ Сбросить элемент", callback_data="elreset")])
+        rows.append([btn(text=T.BTN_RESET, callback_data="elreset")])
     elif phase == "next":
-        lines.append(f"Сейчас: {'+'.join(cur)}")
-        lines.append("Каскад? Нажмите «+ Каскад», чтобы добавить ещё один прыжок "
-                     "(обороты и тип), или «Элемент готов».")
-        rows.append([btn(text="➕ Каскад (+ прыжок)", callback_data="casc")])
-        rows.append([btn(text="Элемент готов ✔️", callback_data="elend")])
-        rows.append([btn(text="✖️ Сбросить элемент", callback_data="elreset")])
+        if can_cascade(cur, cas_used, n_cas):
+            lines.append(T.ASK_CASCADE.format(cur="+".join(cur)))
+            rows.append([btn(text=T.BTN_CASCADE, callback_data="casc")])
+        else:
+            lines.append(T.NO_CASCADE_LEFT.format(cur="+".join(cur)))
+        rows.append([btn(text=T.BTN_ELEMENT_DONE, callback_data="elend")])
+        rows.append([btn(text=T.BTN_RESET, callback_data="elreset")])
     else:  # menu
-        lines.append("Добавить ещё элемент или закончить?")
-        rows.append([btn(text="➕ Ещё элемент", callback_data="elmore")])
+        if full:
+            lines.append(T.ALL_DONE.format(n=len(done)))
+        else:
+            lines.append(T.ASK_MENU)
+            rows.append([btn(text=T.BTN_MORE, callback_data="elmore")])
         rows.append(
             [
-                btn(text="↩️ Убрать последний", callback_data="eldel"),
-                btn(text="Готово ✔️", callback_data="eldone"),
+                btn(text=T.BTN_UNDO, callback_data="eldel"),
+                btn(text=T.BTN_DONE, callback_data="eldone"),
             ]
         )
-    rows.append([btn(text="Пропустить весь пункт", callback_data="skip")])
+    rows.append([btn(text=T.BTN_SKIP_ALL, callback_data="skip")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -164,13 +193,13 @@ def kb(kind: str, key: str = ""):
     if kind == "yesno":
         rows.append(
             [
-                InlineKeyboardButton(text="Да", callback_data="yn:да"),
-                InlineKeyboardButton(text="Нет", callback_data="yn:нет"),
+                InlineKeyboardButton(text=T.BTN_YES, callback_data="yn:да"),
+                InlineKeyboardButton(text=T.BTN_NO, callback_data="yn:нет"),
             ]
         )
     if key == "place":
         rows.append([InlineKeyboardButton(text=str(n), callback_data=f"pl:{n}") for n in range(1, 7)])
-    rows.append([InlineKeyboardButton(text="Пропустить", callback_data="skip")])
+    rows.append([InlineKeyboardButton(text=T.BTN_SKIP, callback_data="skip")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -198,11 +227,7 @@ async def sweep(bot: Bot):
         if await is_subscribed(bot, u["user_id"]) is False:
             db.set_eliminated(u["user_id"])
             try:
-                await bot.send_message(
-                    u["user_id"],
-                    "Ты отписался от канала, поэтому выбываешь из конкурса 😔 "
-                    "Прогнозы можно присылать и дальше, но в зачёт они не идут.",
-                )
+                await bot.send_message(u["user_id"], T.SWEEP_DM)
             except Exception:  # noqa: BLE001
                 pass
         await asyncio.sleep(0.1)
@@ -217,16 +242,63 @@ async def sub_watcher(bot: Bot):
         await asyncio.sleep(6 * 3600)
 
 
+async def remind_check(bot: Bot):
+    """За час до дедлайна напоминает всем активным участникам (один раз на старт)."""
+    now = time.time()
+    for s in db.all_stages():
+        left = s["deadline"] - now
+        if s["scored"] or left <= 0 or left > 3600:
+            continue
+        flag = f"reminded:{s['id']}"
+        if db.kv_get(flag):
+            continue
+        db.kv_set(flag, "1")  # ставим заранее, чтобы не отправить дважды
+        have = {p["user_id"] for p in db.stage_predictions(s["id"])}
+        mins = max(1, int(left // 60))
+        until = f"{fmt_deadline(s['deadline'])} (осталось ~{mins} мин)"
+        sent = 0
+        for u in db.active_users():
+            if u["user_id"] in have:
+                text = T.REMIND_HAVE.format(name=s["name"], until=until)
+                label = T.REMIND_BTN_HAVE
+            else:
+                text = T.REMIND_NEW.format(name=s["name"], until=until)
+                label = T.REMIND_BTN_NEW
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"pick:{s['id']}")]]
+            )
+            try:
+                await bot.send_message(u["user_id"], text, reply_markup=markup)
+                sent += 1
+            except Exception:  # noqa: BLE001  (пользователь заблокировал бота и т.п.)
+                pass
+            await asyncio.sleep(0.05)
+        for a in ADMINS:
+            try:
+                await bot.send_message(a, f"Напоминание по «{s['name']}» отправлено: {sent} из {len(db.active_users())}")
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def reminder_watcher(bot: Bot):
+    while True:
+        try:
+            await remind_check(bot)
+        except Exception:  # noqa: BLE001
+            logging.exception("remind failed")
+        await asyncio.sleep(60)
+
+
 async def gate(bot: Bot, user):
     """Возвращает текст ошибки, если участвовать нельзя, иначе None."""
     u = db.get_user(user.id)
     if not u:
-        return "Сначала нажми /start и подпишись на канал."
+        return T.NEED_START
     if u["eliminated"]:
-        return "Ты выбыл из конкурса из-за отписки от канала 😔"
+        return T.ELIMINATED
     if await is_subscribed(bot, user.id) is False:
         db.set_eliminated(user.id)
-        return f"Ты отписался от {CHANNEL}, поэтому выбываешь из конкурса 😔"
+        return T.UNSUB_NOW.format(channel=CHANNEL)
     return None
 
 
@@ -246,13 +318,12 @@ async def ask(msg: Message, state: FSMContext):
         await finish(msg, state, stage, steps, d)
         return
     key, label, kind = steps[i]
-    header = f"({i + 1}/{len(steps)}) {label}"
+    header = T.STEP_HEADER.format(i=i + 1, n=len(steps), label=label)
     if kind == "elements":
-        text, markup = render_builder(d, header)
+        text, markup = render_builder(d, header, key)
         await msg.answer(text, reply_markup=markup)
         return
-    hint = "Нажми кнопку или напиши число" if key == "place" else HINTS[kind]
-    await msg.answer(f"{header}\n{hint}", reply_markup=kb(kind, key))
+    await msg.answer(f"{header}\n{hint_for(kind, key)}", reply_markup=kb(kind, key))
 
 
 async def record(msg: Message, state: FSMContext, value):
@@ -270,12 +341,12 @@ async def finish(msg: Message, state: FSMContext, stage, steps, d):
     await state.clear()
     if d["mode"] == "predict":
         if time.time() >= stage["deadline"]:
-            await msg.answer("Приём прогнозов уже закрыт, не успел(а) 🥲")
+            await msg.answer(T.TOO_LATE)
             return
         db.save_prediction(d["user_id"], stage["id"], d["answers"])
         await msg.answer(
-            f"Прогноз на «{stage['name']}» сохранён ✅\n\n{fmt_answers(steps, d['answers'])}\n\n"
-            f"Можно переделать до {fmt_deadline(stage['deadline'])} — просто снова /predict"
+            T.SAVED.format(name=stage["name"], answers=fmt_answers(steps, d["answers"]),
+                           deadline=fmt_deadline(stage["deadline"]))
         )
     else:
         db.save_result(stage["id"], d["answers"])
@@ -287,22 +358,14 @@ async def finish(msg: Message, state: FSMContext, stage, steps, d):
 async def cmd_start(m: Message):
     sub = await is_subscribed(m.bot, m.from_user.id)
     if sub is False:
-        await m.answer(f"Чтобы участвовать, подпишись на {CHANNEL} и снова нажми /start 💙")
+        await m.answer(T.START_NEED_SUB.format(channel=CHANNEL))
         return
     existing = db.get_user(m.from_user.id)
     if existing and existing["eliminated"]:
-        await m.answer("Ты выбыл из конкурса из-за отписки от канала 😔")
+        await m.answer(T.ELIMINATED)
         return
     db.upsert_user(m.from_user)
-    await m.answer(
-        "Привет! Угадываем, как Илья откатает старт 🎿⛸\n\n"
-        "Перед стартом присылаешь прогноз: место, баллы за КП/ПП/сумму и контент. "
-        "Можно пропускать пункты.\n\n"
-        "Очки за каждый пункт: 1 — всё верно, 0.75 — почти, 0.5 — примерно, "
-        "0.25 — мимо, 0 — не ответил(а). Очки копятся весь сезон, "
-        "топ-3 получат автограф. Отписка от канала = вылет из конкурса.\n\n"
-        "/predict — сделать прогноз\n/my — мои очки\n/top — таблица лидеров"
-    )
+    await m.answer(T.WELCOME)
 
 
 @router.message(Command("predict"))
@@ -313,13 +376,15 @@ async def cmd_predict(m: Message, state: FSMContext):
         return
     stages = db.open_stages(time.time())
     if not stages:
-        await m.answer("Сейчас нет открытых стартов. Следи за каналом 👀")
+        await m.answer(T.NO_OPEN_STAGES)
         return
     rows = [
-        [InlineKeyboardButton(text=f"{s['name']} (до {fmt_deadline(s['deadline'])})", callback_data=f"pick:{s['id']}")]
+        [InlineKeyboardButton(
+            text=T.STAGE_BTN.format(name=s["name"], deadline=fmt_deadline(s["deadline"])),
+            callback_data=f"pick:{s['id']}")]
         for s in stages
     ]
-    await m.answer("На какой старт прогноз?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await m.answer(T.PICK_STAGE, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @router.callback_query(F.data.startswith("pick:"))
@@ -331,7 +396,7 @@ async def on_pick(cb: CallbackQuery, state: FSMContext):
         return
     stage = db.get_stage(int(cb.data.split(":")[1]))
     if not stage or time.time() >= stage["deadline"]:
-        await cb.message.answer("Приём прогнозов на этот старт закрыт.")
+        await cb.message.answer(T.STAGE_CLOSED)
         return
     await start_flow(cb.message, state, "predict", stage["id"], cb.from_user.id)
 
@@ -366,23 +431,26 @@ async def current_step(state: FSMContext):
 async def on_builder(cb: CallbackQuery, state: FSMContext):
     d, step = await current_step(state)
     if not step or step[2] != "elements":
-        await cb.answer("Этот вопрос уже закрыт")
+        await cb.answer(T.CB_CLOSED)
         return
     data = cb.data
+    key = step[0]
+    n_el, n_cas = limits_for(key)
     phase = d.get("el_phase", "rot")
     done, cur, rot = d.get("el_done", []), d.get("el_cur", []), d.get("el_rot")
+    cas_used = sum(1 for e in done if "+" in e)
 
     if data.startswith("rot:") and phase == "rot":
         rot, phase = int(data[4:]), "type"
     elif data.startswith("typ:") and phase == "type":
         cur.append(f"{rot}{data[4:]}")
         rot, phase = None, "next"
-    elif data == "casc" and phase == "next":
+    elif data == "casc" and phase == "next" and can_cascade(cur, cas_used, n_cas):
         phase = "rot"
     elif data == "elend" and phase == "next":
         done.append("+".join(cur))
         cur, phase = [], "menu"
-    elif data == "elmore" and phase == "menu":
+    elif data == "elmore" and phase == "menu" and len(done) < n_el:
         phase = "rot"
     elif data == "eldel" and phase == "menu" and done:
         done.pop()
@@ -397,7 +465,8 @@ async def on_builder(cb: CallbackQuery, state: FSMContext):
     await state.update_data(el_phase=phase, el_done=done, el_cur=cur, el_rot=rot)
     d = await state.get_data()
     steps = steps_for(db.get_stage(d["stage_id"]))
-    text, markup = render_builder(d, f"({d['idx'] + 1}/{len(steps)}) {step[1]}")
+    text, markup = render_builder(
+        d, T.STEP_HEADER.format(i=d["idx"] + 1, n=len(steps), label=step[1]), key)
     await cb.answer()
     try:
         await cb.message.edit_text(text, reply_markup=markup)
@@ -409,25 +478,25 @@ async def on_builder(cb: CallbackQuery, state: FSMContext):
 async def on_elements_done(cb: CallbackQuery, state: FSMContext):
     d, step = await current_step(state)
     if not step or step[2] != "elements":
-        await cb.answer("Этот вопрос уже закрыт")
+        await cb.answer(T.CB_CLOSED)
         return
     sel = d.get("el_done", [])
     if not sel:
-        await cb.answer("Добавьте хотя бы один элемент или нажмите «Пропустить»", show_alert=True)
+        await cb.answer(T.NEED_ONE_ELEMENT, show_alert=True)
         return
     await cb.answer()
     try:
         await cb.message.edit_reply_markup()
     except Exception:  # noqa: BLE001
         pass
-    await record(cb.message, state, parse_elements(",".join(sel)))
+    await record(cb.message, state, [canon(x) for x in sel])  # порядок как ввёл пользователь
 
 
 @router.callback_query(Form.answering, F.data.startswith("pl:"))
 async def on_place(cb: CallbackQuery, state: FSMContext):
     _d, step = await current_step(state)
     if not step or step[0] != "place":
-        await cb.answer("Этот вопрос уже закрыт")
+        await cb.answer(T.CB_CLOSED)
         return
     await cb.answer()
     try:
@@ -441,12 +510,21 @@ async def on_place(cb: CallbackQuery, state: FSMContext):
 async def on_text(m: Message, state: FSMContext):
     d = await state.get_data()
     steps = steps_for(db.get_stage(d["stage_id"]))
-    kind = steps[d["idx"]][2]
+    key, kind = steps[d["idx"]][0], steps[d["idx"]][2]
     try:
         value = parse_value(kind, m.text)
     except ValueError:
-        await m.answer(f"Не понял формат 🤔\n{HINTS[kind]}")
+        await m.answer(T.BAD_FORMAT.format(hint=hint_for(kind, key)))
         return
+    if kind == "elements" and key in LIMITS:
+        n_el, n_cas = limits_for(key)
+        part = T.PART.get(key, "")
+        if len(value) > n_el:
+            await m.answer(T.TOO_MANY_ELEMENTS.format(part=part, n=n_el))
+            return
+        if sum(1 for e in value if "+" in e) > n_cas:
+            await m.answer(T.TOO_MANY_CASCADES.format(part=part, n=n_cas))
+            return
     await record(m, state, value)
 
 
@@ -455,26 +533,30 @@ async def cmd_my(m: Message):
     rows = db.user_scores(m.from_user.id)
     u = db.get_user(m.from_user.id)
     if not rows:
-        await m.answer("Пока нет прогнозов. Жми /predict")
+        await m.answer(T.MY_EMPTY)
         return
     total = sum(r["score"] for r in rows if r["scored"])
-    lines = [f"• {r['name']}: {r['score']:.2f}" if r["scored"] else f"• {r['name']}: ждёт результатов" for r in rows]
-    status = "\n\n⚠️ Ты выбыл из конкурса (отписка)." if u and u["eliminated"] else ""
-    await m.answer("Твои очки:\n" + "\n".join(lines) + f"\n\nИтого: {total:.2f}{status}")
+    lines = [
+        T.MY_LINE_SCORED.format(name=r["name"], score=r["score"]) if r["scored"]
+        else T.MY_LINE_PENDING.format(name=r["name"])
+        for r in rows
+    ]
+    status = T.MY_ELIMINATED if u and u["eliminated"] else ""
+    await m.answer(T.MY.format(lines="\n".join(lines), total=total, status=status))
 
 
 @router.message(Command("top"))
 async def cmd_top(m: Message):
     rows = db.leaderboard(10)
     if not rows:
-        await m.answer("Таблица пока пуста.")
+        await m.answer(T.TOP_EMPTY)
         return
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, r in enumerate(rows):
         who = f"@{r['username']}" if r["username"] else r["name"]
         lines.append(f"{medals[i] if i < 3 else str(i + 1) + '.'} {who} — {r['total']:.2f}")
-    await m.answer("Таблица лидеров:\n" + "\n".join(lines))
+    await m.answer(T.TOP.format(lines="\n".join(lines)))
 
 
 # ---------------------------------------------------------------- admin commands
@@ -559,6 +641,10 @@ async def run_once(bot: Bot, dp: Dispatcher, duration: int):
     end = time.time() + duration
     offset = int(db.kv_get("offset") or 0)
     while (left := end - time.time()) > 2:
+        try:
+            await remind_check(bot)
+        except Exception:  # noqa: BLE001
+            logging.exception("remind failed")
         updates = await bot.get_updates(
             offset=offset or None,
             timeout=min(25, int(left)),
@@ -589,6 +675,7 @@ async def main():
             await run_once(bot, dp, duration)
         else:  # обычный постоянный режим (VPS, Railway и т.п.)
             asyncio.create_task(sub_watcher(bot))
+            asyncio.create_task(reminder_watcher(bot))
             await dp.start_polling(bot)
     finally:
         await bot.session.close()
