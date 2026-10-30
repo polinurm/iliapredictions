@@ -1,0 +1,63 @@
+name: predict-bot
+
+on:
+  schedule:
+    # Новый запуск ставится в очередь каждые 5 часов и стартует, когда закончится текущий
+    # (один запуск работает ~5 ч 50 мин), поэтому бот почти не прерывается.
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+
+# Один запуск за раз: два бота с одним токеном конфликтуют.
+concurrency:
+  group: predict-bot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHANNEL: ${{ secrets.CHANNEL }}
+      ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+      DB_KEY: ${{ secrets.DB_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # База лежит в ветке `data` в зашифрованном виде.
+      - name: Restore DB
+        run: |
+          git fetch --depth=1 origin data:refs/remotes/origin/data || true
+          if git cat-file -e origin/data:game.db.enc 2>/dev/null; then
+            git show origin/data:game.db.enc > /tmp/game.db.enc
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:DB_KEY -in /tmp/game.db.enc -out game.db
+          fi
+          echo none > /tmp/dbhash
+
+      - name: Run bot (5 ч 50 мин) и сохранять базу каждые 10 минут
+        run: |
+          python bot.py once 21000 &
+          BOT=$!
+          while kill -0 "$BOT" 2>/dev/null; do
+            for i in $(seq 60); do
+              kill -0 "$BOT" 2>/dev/null || break
+              sleep 10
+            done
+            bash scripts/save_db.sh || echo "сохранение пропущено, попробуем через 10 минут"
+          done
+          wait "$BOT"
+
+      - name: Save DB (финальное сохранение)
+        if: always()
+        run: bash scripts/save_db.sh
