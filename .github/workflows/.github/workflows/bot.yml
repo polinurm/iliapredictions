@@ -61,4 +61,3 @@ jobs:
       - name: Save DB (финальное сохранение)
         if: always()
         run: bash scripts/save_db.sh
-
