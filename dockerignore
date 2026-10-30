@@ -1,6 +1,0 @@
-.env
-.git
-.github
-game.db
-game.db.enc
-__pycache__/
