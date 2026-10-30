@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -185,7 +186,8 @@ def render_builder(d: dict, header: str, key: str = ""):
             ]
         )
     rows.append([btn(text=T.BTN_SKIP_ALL, callback_data="skip")])
-    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))  # без двойных пустых строк
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb(kind: str, key: str = ""):
