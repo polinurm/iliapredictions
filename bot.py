@@ -128,7 +128,7 @@ def render_builder(d: dict, header: str):
         else:
             lines.append(f"Элемент {len(done) + 1}. Введите количество оборотов.")
         lines.append("(Можно сразу написать текстом, например: 4Lz+3T, 3A)")
-        rows.append([btn(text=str(n), callback_data=f"rot:{n}") for n in (1, 2, 3, 4)])
+        rows.append([btn(text=str(n), callback_data=f"rot:{n}") for n in (1, 2, 3, 4, 5)])
         if cur:
             rows.append([btn(text="✖️ Сбросить элемент", callback_data="elreset")])
         elif done:
