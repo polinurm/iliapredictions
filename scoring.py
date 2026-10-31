@@ -1,6 +1,5 @@
 """Подсчёт очков. Вся логика "насколько близко угадал" живёт здесь — правь пороги под себя."""
 import re
-from collections import Counter
 
 # Лимиты контента по правилам: сколько прыжковых элементов и сколько из них каскадов.
 # Меняй числа здесь: подсказки и проверки в боте подстроятся сами.
@@ -9,10 +8,24 @@ LIMITS = {
     "fs_content": {"elements": 6, "cascades": 2},
 }
 
-# Учитывать ли порядок элементов при подсчёте очков.
-# False: порядок только запоминается и показывается, очки считаются по набору элементов.
-# True: элемент засчитывается, только если стоит на своём месте.
-ORDER_MATTERS = False
+# Очки за каждый элемент программы (оценивается каждый элемент из фактического контента):
+#   стоит на своём месте в прогнозе  -> ELEMENT_EXACT
+#   есть в прогнозе, но на другом месте -> ELEMENT_PRESENT
+#   в прогнозе нет вообще            -> 0
+# За весь пункт очки суммируются: в КП максимум 3, в ПП максимум 6.
+ELEMENT_EXACT = 1.0
+ELEMENT_PRESENT = 0.5
+# Каскад, у которого угадан только первый прыжок (например, в факте 4Lz+3T, в прогнозе 4Lz+2T):
+# половина очков, которые дал бы целый элемент (0.5 на своём месте, 0.25 на другом).
+CASCADE_PARTIAL = 0.5
+
+# Вес каждого пункта: очки за пункт умножаются на это число. Крути, чтобы поменять
+# значимость пунктов (например, "total": 0.5 сделает сумму баллов вдвое менее важной).
+WEIGHTS = {
+    "place": 1.0, "sp": 1.0, "fs": 1.0, "total": 1.0,
+    "sp_content": 1.0, "fs_content": 1.0,
+    "side": 1.0,  # сайд-вопросы
+}
 
 # (ключ, подпись, тип)
 FIELDS = [
@@ -58,6 +71,41 @@ def parse_elements(text: str) -> list[str]:
     return [canon(x) for x in tokens]  # порядок сохраняем как ввёл пользователь
 
 
+def _first(el: str) -> str:
+    return el.split("+")[0]
+
+
+def score_elements(pred, actual) -> float:
+    """Каждый фактический элемент: на своём месте 1, есть где-то ещё 0.5, нет 0.
+    Каскад, у которого угадан только первый прыжок, даёт половину от этих очков."""
+    pl = [canon(x) for x in pred]
+    al = [canon(x) for x in actual]
+    used = [False] * len(pl)
+    got = [None] * len(al)
+    # 1) точное совпадение на своём месте
+    for i, e in enumerate(al):
+        if i < len(pl) and pl[i] == e:
+            got[i], used[i] = ELEMENT_EXACT, True
+    # 2) тот же элемент, но на другом месте
+    for i, e in enumerate(al):
+        if got[i] is None:
+            for j, p in enumerate(pl):
+                if not used[j] and p == e:
+                    got[i], used[j] = ELEMENT_PRESENT, True
+                    break
+    # 3) каскад с верным первым прыжком: половина очков
+    for i, e in enumerate(al):
+        if got[i] is None and "+" in e:
+            if i < len(pl) and not used[i] and "+" in pl[i] and _first(pl[i]) == _first(e):
+                got[i], used[i] = CASCADE_PARTIAL * ELEMENT_EXACT, True
+                continue
+            for j, p in enumerate(pl):
+                if not used[j] and "+" in p and _first(p) == _first(e):
+                    got[i], used[j] = CASCADE_PARTIAL * ELEMENT_PRESENT, True
+                    break
+    return sum(g or 0.0 for g in got)
+
+
 def score_field(key: str, kind: str, pred, actual) -> float:
     if pred is None:
         return 0.0
@@ -74,25 +122,7 @@ def score_field(key: str, kind: str, pred, actual) -> float:
             return 0.5
         return 0.25
     if kind == "elements":
-        pl, al = [canon(x) for x in pred], [canon(x) for x in actual]
-        if ORDER_MATTERS:
-            miss = sum(
-                1 for i in range(max(len(pl), len(al)))
-                if i >= len(pl) or i >= len(al) or pl[i] != al[i]
-            )
-            if miss == 0:
-                return 1.0
-            if miss == 1:
-                return 0.75
-            return 0.5 if miss <= len(al) / 2 else 0.25
-        p, a = Counter(pl), Counter(al)
-        if p == a:
-            return 1.0
-        if max(sum((a - p).values()), sum((p - a).values())) == 1:
-            return 0.75
-        if al and sum((a & p).values()) >= len(al) / 2:
-            return 0.5
-        return 0.25
+        return score_elements(pred, actual)
     if kind == "yesno":
         return 1.0 if pred == actual else 0.25
     return 0.0
@@ -103,5 +133,23 @@ def score_entry(answers: dict, result: dict, side_count: int):
     spec = list(FIELDS) + [(f"side{i}", "", "yesno") for i in range(side_count)]
     breakdown = {}
     for key, _label, kind in spec:
-        breakdown[key] = score_field(key, kind, answers.get(key), result.get(key))
+        w = WEIGHTS.get(key, WEIGHTS["side"] if key.startswith("side") else 1.0)
+        breakdown[key] = w * score_field(key, kind, answers.get(key), result.get(key))
     return sum(breakdown.values()), breakdown
+
+
+def exact_hits(answers: dict, result: dict, side_count: int) -> int:
+    """Число точных попаданий за старт (для разрешения ничьих в таблице):
+    пункты с полным баллом + элементы программы, стоящие ровно на своём месте."""
+    spec = list(FIELDS) + [(f"side{i}", "", "yesno") for i in range(side_count)]
+    n = 0
+    for key, _label, kind in spec:
+        pred, actual = answers.get(key), result.get(key)
+        if pred is None or actual is None:
+            continue
+        if kind == "elements":
+            pl, al = [canon(x) for x in pred], [canon(x) for x in actual]
+            n += sum(1 for i, e in enumerate(al) if i < len(pl) and pl[i] == e)
+        elif score_field(key, kind, pred, actual) == 1.0:
+            n += 1
+    return n
