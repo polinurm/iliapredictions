@@ -146,6 +146,15 @@ def stage_top(sid, limit=10):
     )
 
 
+def scored_predictions():
+    """Все прогнозы по уже подсчитанным стартам (нужно для разрешения ничьих)."""
+    return run(
+        "SELECT p.user_id, p.answers, s.result, s.side FROM predictions p "
+        "JOIN stages s ON s.id=p.stage_id WHERE s.scored=1 AND s.result IS NOT NULL",
+        fetch="all",
+    )
+
+
 def user_scores(uid):
     return run(
         "SELECT s.name, p.score, s.scored FROM predictions p JOIN stages s ON s.id=p.stage_id "
