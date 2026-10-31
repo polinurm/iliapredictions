@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 import db
 import texts as T
-from scoring import FIELDS, LIMITS, canon, parse_elements, score_entry
+from scoring import FIELDS, LIMITS, canon, exact_hits, parse_elements, score_entry
 
 load_dotenv()
 TOKEN = os.environ["BOT_TOKEN"]
@@ -547,17 +547,29 @@ async def cmd_my(m: Message):
     await m.answer(T.MY.format(lines="\n".join(lines), total=total, status=status))
 
 
+def ranking():
+    """Таблица лидеров: сначала по сумме очков, при равенстве по числу точных попаданий."""
+    rows = db.leaderboard(100000)
+    hits = {}
+    for p in db.scored_predictions():
+        h = exact_hits(json.loads(p["answers"]), json.loads(p["result"]), len(json.loads(p["side"])))
+        hits[p["user_id"]] = hits.get(p["user_id"], 0) + h
+    ranked = sorted(rows, key=lambda r: (-round(r["total"], 6), -hits.get(r["user_id"], 0)))
+    return ranked, hits
+
+
 @router.message(Command("top"))
 async def cmd_top(m: Message):
-    rows = db.leaderboard(10)
-    if not rows:
+    ranked, hits = ranking()
+    if not ranked:
         await m.answer(T.TOP_EMPTY)
         return
     medals = ["🥇", "🥈", "🥉"]
     lines = []
-    for i, r in enumerate(rows):
+    for i, r in enumerate(ranked[:10]):
         who = f"@{r['username']}" if r["username"] else r["name"]
-        lines.append(f"{medals[i] if i < 3 else str(i + 1) + '.'} {who} — {r['total']:.2f}")
+        lines.append(T.TOP_LINE.format(place=medals[i] if i < 3 else f"{i + 1}.", who=who,
+                                       total=r["total"], hits=hits.get(r["user_id"], 0)))
     await m.answer(T.TOP.format(lines="\n".join(lines)))
 
 
