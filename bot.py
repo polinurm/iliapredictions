@@ -582,31 +582,47 @@ async def cmd_my(m: Message):
     await m.answer(T.MY.format(lines="\n".join(lines), total=total, status=status))
 
 
-def ranking():
-    """Таблица лидеров: сначала по сумме очков, при равенстве по числу точных попаданий."""
+def ranking(part=None):
+    """Таблица лидеров: по сумме очков, при равенстве по числу точных попаданий.
+    part=None — весь сезон, 1 или 2 — только этот этап конкурса."""
     # админы в конкурсе не участвуют: в таблице их нет (но пользоваться ботом они могут)
-    rows = [r for r in db.leaderboard(100000) if r["user_id"] not in ADMINS]
+    rows = [r for r in db.part_leaderboard(part) if r["user_id"] not in ADMINS]
     hits = {}
     for p in db.scored_predictions():
+        if part and p["part"] != part:
+            continue
         h = exact_hits(json.loads(p["answers"]), json.loads(p["result"]), len(json.loads(p["side"])))
         hits[p["user_id"]] = hits.get(p["user_id"], 0) + h
     ranked = sorted(rows, key=lambda r: (-round(r["total"], 6), -hits.get(r["user_id"], 0)))
     return ranked, hits
 
 
-@router.message(Command("top"))
-async def cmd_top(m: Message):
-    ranked, hits = ranking()  # таблицу видят все, админов в ней нет
-    if not ranked:
-        await m.answer(T.TOP_EMPTY)
-        return
+def top_block(title, part):
+    ranked, hits = ranking(part)
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, r in enumerate(ranked[:10]):
+        if r["total"] <= 0 and not hits.get(r["user_id"]):
+            continue  # ещё без очков в этой таблице
         who = esc(f"@{r['username']}" if r["username"] else r["name"])
         lines.append(T.TOP_LINE.format(place=medals[i] if i < 3 else f"{i + 1}.", who=who,
                                        total=r["total"], hits=hits.get(r["user_id"], 0)))
-    await m.answer(T.TOP.format(lines="\n".join(lines)))
+    return f"<b>{title}</b>\n<blockquote>" + "\n".join(lines) + "</blockquote>" if lines else ""
+
+
+@router.message(Command("top"))
+async def cmd_top(m: Message):
+    parts = sorted({s["part"] or 1 for s in db.all_stages() if s["scored"]})
+    blocks = []
+    if len(parts) > 1 or (parts and parts != [1]):
+        for p in parts:
+            blocks.append(top_block(T.TOP_PART_TITLE.format(part=p), p))
+    blocks.append(top_block(T.TOP_SEASON_TITLE if len(parts) > 1 else T.TOP_TITLE, None))
+    blocks = [b for b in blocks if b]
+    if not blocks:
+        await m.answer(T.TOP_EMPTY)
+        return
+    await m.answer("\n\n".join(blocks) + "\n\n" + T.TOP_NOTE)
 
 
 # ---------------------------------------------------------------- admin commands
@@ -637,6 +653,20 @@ async def cmd_addside(m: Message, command: CommandObject):
     await m.answer(f"Добавлено. Сайд-вопросов на старте: {n}")
 
 
+@router.message(Command("part"))
+async def cmd_part(m: Message, command: CommandObject):
+    if not is_admin(m.from_user.id):
+        return
+    try:
+        sid, part = (int(x) for x in command.args.split())
+        assert part in (1, 2) and db.get_stage(sid)
+    except Exception:  # noqa: BLE001
+        await m.answer("<b>Формат:</b> <code>/part 2 1</code> (id старта, номер этапа конкурса: 1 или 2)")
+        return
+    db.set_part(sid, part)
+    await m.answer(f"Старт {sid} теперь в этапе {part} ✅")
+
+
 @router.message(Command("stages"))
 async def cmd_stages(m: Message):
     if not is_admin(m.from_user.id):
@@ -644,7 +674,7 @@ async def cmd_stages(m: Message):
     rows = db.all_stages()
     await m.answer(
         "\n".join(
-            f"{s['id']}. <b>{esc(s['name'])}</b> — до {fmt_deadline(s['deadline'])}, "
+            f"{s['id']}. <b>{esc(s['name'])}</b> (этап {s['part'] or 1}) — до {fmt_deadline(s['deadline'])}, "
             f"{'подсчитан' if s['scored'] else ('есть результат' if s['result'] else 'без результата')}"
             for s in rows
         )
