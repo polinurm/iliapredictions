@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import logging
 import os
@@ -9,6 +10,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -27,6 +30,11 @@ ADMINS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
 MSK = ZoneInfo("Europe/Moscow")
 
 router = Router()
+
+
+def esc(x) -> str:
+    """Экранирует пользовательский текст для HTML-разметки Telegram."""
+    return html.escape(str(x), quote=False)
 
 
 class Form(StatesGroup):
@@ -106,10 +114,10 @@ def fmt_answers(steps, answers):
         if v is None:
             shown = T.SKIPPED_MARK
         elif isinstance(v, list):
-            shown = " → ".join(v)
+            shown = " → ".join(esc(x) for x in v)
         else:
-            shown = str(v)
-        lines.append(f"• {label} {shown}")
+            shown = esc(v)
+        lines.append(f"• {esc(label)} <b>{shown}</b>")
     return "\n".join(lines)
 
 
@@ -269,10 +277,10 @@ async def remind_check(bot: Bot):
         sent = 0
         for u in db.active_users():
             if u["user_id"] in have:
-                text = T.REMIND_HAVE.format(name=s["name"], until=until)
+                text = T.REMIND_HAVE.format(name=esc(s["name"]), until=until)
                 label = T.REMIND_BTN_HAVE
             else:
-                text = T.REMIND_NEW.format(name=s["name"], until=until)
+                text = T.REMIND_NEW.format(name=esc(s["name"]), until=until)
                 label = T.REMIND_BTN_NEW
             markup = InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"pick:{s['id']}")]]
@@ -285,7 +293,7 @@ async def remind_check(bot: Bot):
             await asyncio.sleep(0.05)
         for a in ADMINS:
             try:
-                await bot.send_message(a, f"Напоминание по «{s['name']}» отправлено: {sent} из {len(db.active_users())}")
+                await bot.send_message(a, f"Напоминание по «{esc(s['name'])}» отправлено: {sent} из {len(db.active_users())}")
             except Exception:  # noqa: BLE001
                 pass
 
@@ -332,7 +340,7 @@ async def ask(msg: Message, state: FSMContext):
         await finish(msg, state, stage, steps, d)
         return
     key, label, kind = steps[i]
-    header = T.STEP_HEADER.format(i=i + 1, n=len(steps), label=label)
+    header = T.STEP_HEADER.format(i=i + 1, n=len(steps), label=esc(label))
     if kind == "elements":
         text, markup = render_builder(d, header, key)
         await msg.answer(text, reply_markup=markup)
@@ -359,12 +367,12 @@ async def finish(msg: Message, state: FSMContext, stage, steps, d):
             return
         db.save_prediction(d["user_id"], stage["id"], d["answers"])
         await msg.answer(
-            T.SAVED.format(name=stage["name"], answers=fmt_answers(steps, d["answers"]),
+            T.SAVED.format(name=esc(stage["name"]), answers=fmt_answers(steps, d["answers"]),
                            deadline=fmt_deadline(stage["deadline"]))
         )
     else:
         db.save_result(stage["id"], d["answers"])
-        await msg.answer(f"Результаты сохранены ✅ Теперь /score {stage['id']}")
+        await msg.answer(f"Результаты сохранены ✅ Теперь <code>/score {stage['id']}</code>")
 
 
 # ---------------------------------------------------------------- user commands
@@ -484,7 +492,7 @@ async def on_builder(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
     steps = steps_for(db.get_stage(d["stage_id"]))
     text, markup = render_builder(
-        d, T.STEP_HEADER.format(i=d["idx"] + 1, n=len(steps), label=step[1]), key)
+        d, T.STEP_HEADER.format(i=d["idx"] + 1, n=len(steps), label=esc(step[1])), key)
     await cb.answer()
     try:
         await cb.message.edit_text(text, reply_markup=markup)
@@ -555,8 +563,8 @@ async def cmd_my(m: Message):
         return
     total = sum(r["score"] for r in rows if r["scored"])
     lines = [
-        T.MY_LINE_SCORED.format(name=r["name"], score=r["score"]) if r["scored"]
-        else T.MY_LINE_PENDING.format(name=r["name"])
+        T.MY_LINE_SCORED.format(name=esc(r["name"]), score=r["score"]) if r["scored"]
+        else T.MY_LINE_PENDING.format(name=esc(r["name"]))
         for r in rows
     ]
     status = T.MY_ELIMINATED if u and u["eliminated"] else ""
@@ -587,7 +595,7 @@ async def cmd_top(m: Message):
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, r in enumerate(ranked[:10]):
-        who = f"@{r['username']}" if r["username"] else r["name"]
+        who = esc(f"@{r['username']}" if r["username"] else r["name"])
         lines.append(T.TOP_LINE.format(place=medals[i] if i < 3 else f"{i + 1}.", who=who,
                                        total=r["total"], hits=hits.get(r["user_id"], 0)))
     await m.answer(T.TOP.format(lines="\n".join(lines)))
@@ -602,10 +610,10 @@ async def cmd_newstage(m: Message, command: CommandObject):
         name, dl = [x.strip() for x in command.args.split("|")]
         ts = int(datetime.strptime(dl, "%Y-%m-%d %H:%M").replace(tzinfo=MSK).timestamp())
     except Exception:  # noqa: BLE001
-        await m.answer("Формат: /newstage Skate America КП | 2026-10-30 20:00 (время МСК, дедлайн прогнозов)")
+        await m.answer("<b>Формат:</b> <code>/newstage Skate America КП | 2026-10-30 20:00</code> (время МСК, дедлайн прогнозов)")
         return
     sid = db.create_stage(name, ts)
-    await m.answer(f"Старт создан, id={sid}. Дедлайн: {fmt_deadline(ts)}\nСайд-вопрос: /addside {sid} Прыгнет ли ...?")
+    await m.answer(f"<b>Старт создан</b>, id={sid}. Дедлайн: {fmt_deadline(ts)}\nСайд-вопрос: <code>/addside {sid} Прыгнет ли ...?</code>")
 
 
 @router.message(Command("addside"))
@@ -616,7 +624,7 @@ async def cmd_addside(m: Message, command: CommandObject):
         sid, text = command.args.split(" ", 1)
         n = db.add_side(int(sid), text.strip())
     except Exception:  # noqa: BLE001
-        await m.answer("Формат: /addside <id> Текст вопроса (ответ да/нет)")
+        await m.answer("<b>Формат:</b> <code>/addside 2 Текст вопроса</code>")
         return
     await m.answer(f"Добавлено. Сайд-вопросов на старте: {n}")
 
@@ -628,7 +636,7 @@ async def cmd_stages(m: Message):
     rows = db.all_stages()
     await m.answer(
         "\n".join(
-            f"{s['id']}. {s['name']} — до {fmt_deadline(s['deadline'])}, "
+            f"{s['id']}. <b>{esc(s['name'])}</b> — до {fmt_deadline(s['deadline'])}, "
             f"{'подсчитан' if s['scored'] else ('есть результат' if s['result'] else 'без результата')}"
             for s in rows
         )
@@ -642,9 +650,9 @@ async def cmd_result(m: Message, command: CommandObject, state: FSMContext):
         return
     stage = db.get_stage(int(command.args)) if command.args and command.args.strip().isdigit() else None
     if not stage:
-        await m.answer("Формат: /result <id старта>")
+        await m.answer("<b>Формат:</b> <code>/result 2</code> (id старта)")
         return
-    await m.answer(f"Вводим фактические результаты для «{stage['name']}»")
+    await m.answer(f"Вводим фактические результаты для «<b>{esc(stage['name'])}</b>»")
     await start_flow(m, state, "result", stage["id"], m.from_user.id)
 
 
@@ -654,7 +662,7 @@ async def cmd_score(m: Message, command: CommandObject):
         return
     stage = db.get_stage(int(command.args)) if command.args and command.args.strip().isdigit() else None
     if not stage or not stage["result"]:
-        await m.answer("Формат: /score <id>. Сначала внесите результаты через /result <id>.")
+        await m.answer("<b>Формат:</b> <code>/score 2</code>. Сначала внесите результаты через <code>/result 2</code>.")
         return
     await sweep(m.bot)  # обновляем статус подписки перед подсчётом
     result = json.loads(stage["result"])
@@ -665,8 +673,8 @@ async def cmd_score(m: Message, command: CommandObject):
         db.set_score(p["user_id"], stage["id"], total)
     db.mark_scored(stage["id"])
     top = [r for r in db.stage_top(stage["id"], 1000) if r["user_id"] not in ADMINS][:5]
-    lines = [f"{i + 1}. {('@' + r['username']) if r['username'] else r['name']} — {r['score']:.2f}" for i, r in enumerate(top)]
-    await m.answer(f"Подсчитано прогнозов: {len(preds)}\nТоп за старт:\n" + "\n".join(lines) + "\n\nОбщая таблица: /top")
+    lines = [f"{i + 1}. {esc(('@' + r['username']) if r['username'] else r['name'])} — <b>{r['score']:.2f}</b>" for i, r in enumerate(top)]
+    await m.answer(f"<b>Подсчитано прогнозов:</b> {len(preds)}\n<b>Топ за старт</b>\n<blockquote>" + "\n".join(lines) + "</blockquote>\n\nОбщая таблица: /top")
 
 
 # ---------------------------------------------------------------- main
@@ -700,7 +708,7 @@ async def run_once(bot: Bot, dp: Dispatcher, duration: int):
 async def main():
     logging.basicConfig(level=logging.INFO)
     db.init()
-    bot = Bot(TOKEN)
+    bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=SqliteStorage())
     dp.include_router(router)
     try:
