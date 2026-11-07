@@ -36,6 +36,10 @@ def init():
         CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT);
         """
     )
+    try:  # этап конкурса (1 или 2) для старта; у старых баз колонки ещё нет
+        c.execute("ALTER TABLE stages ADD COLUMN part INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
     c.commit()
     c.close()
 
@@ -116,6 +120,10 @@ def save_result(sid, result):
     run("UPDATE stages SET result=? WHERE id=?", (json.dumps(result, ensure_ascii=False), sid))
 
 
+def set_part(sid, part):
+    run("UPDATE stages SET part=? WHERE id=?", (part, sid))
+
+
 def mark_scored(sid):
     run("UPDATE stages SET scored=1 WHERE id=?", (sid,))
 
@@ -147,6 +155,18 @@ def leaderboard(limit=10):
     )
 
 
+def part_leaderboard(part=None):
+    """Суммы очков по подсчитанным стартам: за весь сезон (part=None) или за один этап."""
+    cond, args = ("AND s.part=?", (part,)) if part else ("", ())
+    return run(
+        "SELECT u.user_id, u.name, u.username, COALESCE(SUM(p.score),0) AS total FROM users u "
+        "LEFT JOIN (predictions p JOIN stages s ON s.id=p.stage_id AND s.scored=1 " + cond + ") "
+        "ON p.user_id=u.user_id WHERE u.eliminated=0 GROUP BY u.user_id",
+        args,
+        "all",
+    )
+
+
 def stage_top(sid, limit=10):
     return run(
         "SELECT u.user_id, u.name, u.username, p.score FROM predictions p JOIN users u ON u.user_id=p.user_id "
@@ -159,7 +179,7 @@ def stage_top(sid, limit=10):
 def scored_predictions():
     """Все прогнозы по уже подсчитанным стартам (нужно для разрешения ничьих)."""
     return run(
-        "SELECT p.user_id, p.answers, s.result, s.side FROM predictions p "
+        "SELECT p.user_id, p.answers, s.result, s.side, s.part FROM predictions p "
         "JOIN stages s ON s.id=p.stage_id WHERE s.scored=1 AND s.result IS NOT NULL",
         fetch="all",
     )
