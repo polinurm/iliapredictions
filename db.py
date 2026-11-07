@@ -73,8 +73,18 @@ def active_users():
     return run("SELECT * FROM users WHERE eliminated=0", fetch="all")
 
 
+def all_users():
+    return run("SELECT * FROM users", fetch="all")
+
+
+# Колонка eliminated = «игра на паузе, пока нет подписки на канал».
+# Вернулся в канал — set_active снимает паузу, очки сохраняются.
 def set_eliminated(uid):
     run("UPDATE users SET eliminated=1 WHERE user_id=?", (uid,))
+
+
+def set_active(uid):
+    run("UPDATE users SET eliminated=0 WHERE user_id=?", (uid,))
 
 
 # ---- stages
@@ -139,7 +149,7 @@ def leaderboard(limit=10):
 
 def stage_top(sid, limit=10):
     return run(
-        "SELECT u.name, u.username, p.score FROM predictions p JOIN users u ON u.user_id=p.user_id "
+        "SELECT u.user_id, u.name, u.username, p.score FROM predictions p JOIN users u ON u.user_id=p.user_id "
         "WHERE p.stage_id=? AND u.eliminated=0 ORDER BY p.score DESC LIMIT ?",
         (sid, limit),
         "all",
