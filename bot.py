@@ -382,6 +382,16 @@ async def cmd_start(m: Message):
     if sub is False:
         await m.answer(T.START_NEED_SUB.format(channel=CHANNEL))
         return
+    if sub is None:  # проверить не удалось (чаще всего бот не админ канала или неверный CHANNEL)
+        await m.answer(T.START_CHECK_FAILED)
+        for a in ADMINS:
+            try:
+                await m.bot.send_message(
+                    a, f"⚠️ Не удалось проверить подписку на {esc(CHANNEL)}. Проверь, что бот добавлен в канал "
+                       "<b>администратором</b> и что в секрете <code>CHANNEL</code> указан @username канала.")
+            except Exception:  # noqa: BLE001
+                pass
+        return
     existing = db.get_user(m.from_user.id)
     db.upsert_user(m.from_user)
     if existing and existing["eliminated"]:
