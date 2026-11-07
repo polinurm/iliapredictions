@@ -596,10 +596,7 @@ def ranking():
 
 @router.message(Command("top"))
 async def cmd_top(m: Message):
-    if not is_admin(m.from_user.id):  # таблицу лидеров видят только админы
-        await m.answer(T.TOP_HIDDEN)
-        return
-    ranked, hits = ranking()
+    ranked, hits = ranking()  # таблицу видят все, админов в ней нет
     if not ranked:
         await m.answer(T.TOP_EMPTY)
         return
