@@ -224,12 +224,20 @@ async def is_subscribed(bot: Bot, user_id: int):
 
 
 async def sweep(bot: Bot):
-    """Проверяет подписку у всех живых участников и выбивает отписавшихся."""
-    for u in db.active_users():
-        if await is_subscribed(bot, u["user_id"]) is False:
+    """Проверяет подписку у всех участников: отписавшихся ставит на паузу,
+    вернувшихся в канал возвращает в игру (очки сохраняются)."""
+    for u in db.all_users():
+        sub = await is_subscribed(bot, u["user_id"])
+        note = None
+        if sub is False and not u["eliminated"]:
             db.set_eliminated(u["user_id"])
+            note = T.SWEEP_DM
+        elif sub is True and u["eliminated"]:
+            db.set_active(u["user_id"])
+            note = T.RETURNED_DM
+        if note:
             try:
-                await bot.send_message(u["user_id"], T.SWEEP_DM)
+                await bot.send_message(u["user_id"], note)
             except Exception:  # noqa: BLE001
                 pass
         await asyncio.sleep(0.1)
@@ -296,11 +304,15 @@ async def gate(bot: Bot, user):
     u = db.get_user(user.id)
     if not u:
         return T.NEED_START
-    if u["eliminated"]:
-        return T.ELIMINATED
-    if await is_subscribed(bot, user.id) is False:
+    sub = await is_subscribed(bot, user.id)
+    if sub is False:
         db.set_eliminated(user.id)
-        return T.UNSUB_NOW.format(channel=CHANNEL)
+        return T.PAUSED.format(channel=CHANNEL)
+    if u["eliminated"]:
+        if sub is True:  # вернулся в канал: снимаем паузу
+            db.set_active(user.id)
+        else:  # подписку проверить не удалось: не пускаем, пока не убедимся
+            return T.PAUSED.format(channel=CHANNEL)
     return None
 
 
@@ -363,10 +375,14 @@ async def cmd_start(m: Message):
         await m.answer(T.START_NEED_SUB.format(channel=CHANNEL))
         return
     existing = db.get_user(m.from_user.id)
-    if existing and existing["eliminated"]:
-        await m.answer(T.ELIMINATED)
-        return
     db.upsert_user(m.from_user)
+    if existing and existing["eliminated"]:
+        if sub is True:  # вернулся в канал: возвращаем в игру с прежними очками
+            db.set_active(m.from_user.id)
+            await m.answer(T.WELCOME_BACK)
+        else:
+            await m.answer(T.PAUSED.format(channel=CHANNEL))
+        return
     await m.answer(T.WELCOME)
 
 
@@ -549,7 +565,8 @@ async def cmd_my(m: Message):
 
 def ranking():
     """Таблица лидеров: сначала по сумме очков, при равенстве по числу точных попаданий."""
-    rows = db.leaderboard(100000)
+    # админы в конкурсе не участвуют: в таблице их нет (но пользоваться ботом они могут)
+    rows = [r for r in db.leaderboard(100000) if r["user_id"] not in ADMINS]
     hits = {}
     for p in db.scored_predictions():
         h = exact_hits(json.loads(p["answers"]), json.loads(p["result"]), len(json.loads(p["side"])))
@@ -560,6 +577,9 @@ def ranking():
 
 @router.message(Command("top"))
 async def cmd_top(m: Message):
+    if not is_admin(m.from_user.id):  # таблицу лидеров видят только админы
+        await m.answer(T.TOP_HIDDEN)
+        return
     ranked, hits = ranking()
     if not ranked:
         await m.answer(T.TOP_EMPTY)
@@ -636,7 +656,7 @@ async def cmd_score(m: Message, command: CommandObject):
     if not stage or not stage["result"]:
         await m.answer("Формат: /score <id>. Сначала внесите результаты через /result <id>.")
         return
-    await sweep(m.bot)  # выбиваем отписавшихся перед подсчётом
+    await sweep(m.bot)  # обновляем статус подписки перед подсчётом
     result = json.loads(stage["result"])
     side_count = len(json.loads(stage["side"]))
     preds = db.stage_predictions(stage["id"])
@@ -644,7 +664,7 @@ async def cmd_score(m: Message, command: CommandObject):
         total, _ = score_entry(json.loads(p["answers"]), result, side_count)
         db.set_score(p["user_id"], stage["id"], total)
     db.mark_scored(stage["id"])
-    top = db.stage_top(stage["id"], 5)
+    top = [r for r in db.stage_top(stage["id"], 1000) if r["user_id"] not in ADMINS][:5]
     lines = [f"{i + 1}. {('@' + r['username']) if r['username'] else r['name']} — {r['score']:.2f}" for i, r in enumerate(top)]
     await m.answer(f"Подсчитано прогнозов: {len(preds)}\nТоп за старт:\n" + "\n".join(lines) + "\n\nОбщая таблица: /top")
 
