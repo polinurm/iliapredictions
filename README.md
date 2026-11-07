@@ -1,4 +1,4 @@
-# Malination Prediction Bot
+#Prediction Bot
 
 ## Запуск на GitHub Actions
 Workflow `.github/workflows/bot.yml` запускает `python bot.py once 21000`: бот слушает Telegram
