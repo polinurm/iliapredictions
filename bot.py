@@ -27,6 +27,7 @@ load_dotenv()
 TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL"]  # например @malination (бот должен быть админом канала)
 ADMINS = {int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()}
+SUPPORT = os.getenv("SUPPORT", "").strip() or "https://t.me/malination"  # ссылка на директ для связи
 MSK = ZoneInfo("Europe/Moscow")
 
 router = Router()
@@ -383,7 +384,7 @@ async def cmd_start(m: Message):
         await m.answer(T.START_NEED_SUB.format(channel=CHANNEL))
         return
     if sub is None:  # проверить не удалось (чаще всего бот не админ канала или неверный CHANNEL)
-        await m.answer(T.START_CHECK_FAILED)
+        await m.answer(T.START_CHECK_FAILED.format(contact=html.escape(SUPPORT)))
         for a in ADMINS:
             try:
                 await m.bot.send_message(
