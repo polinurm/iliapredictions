@@ -405,6 +405,11 @@ async def cmd_start(m: Message):
     await m.answer(T.WELCOME)
 
 
+@router.message(Command("myid"))
+async def cmd_myid(m: Message):
+    await m.answer(f"Твой id: <code>{m.from_user.id}</code>\nЕго можно скопировать нажатием.")
+
+
 @router.message(Command("predict"))
 async def cmd_predict(m: Message, state: FSMContext):
     err = await gate(m.bot, m.from_user)
@@ -725,11 +730,16 @@ async def run_once(bot: Bot, dp: Dispatcher, duration: int):
             await remind_check(bot)
         except Exception:  # noqa: BLE001
             logging.exception("remind failed")
-        updates = await bot.get_updates(
-            offset=offset or None,
-            timeout=min(25, int(left)),
-            allowed_updates=dp.resolve_used_update_types(),
-        )
+        try:
+            updates = await bot.get_updates(
+                offset=offset or None,
+                timeout=min(25, int(left)),
+                allowed_updates=dp.resolve_used_update_types(),
+            )
+        except Exception as e:  # noqa: BLE001  (Bad Gateway, обрыв сети и т.п.: просто пробуем ещё раз)
+            logging.warning("get_updates failed: %s", e)
+            await asyncio.sleep(3)
+            continue
         for u in updates:
             try:
                 await dp.feed_update(bot, u)
