@@ -402,7 +402,7 @@ async def cmd_start(m: Message):
         else:
             await m.answer(T.PAUSED.format(channel=CHANNEL))
         return
-    await m.answer(T.WELCOME)
+    await m.answer(T.WELCOME.format(channel=esc(CHANNEL)))
 
 
 @router.message(Command("myid"))
